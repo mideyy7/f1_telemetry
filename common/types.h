@@ -11,7 +11,7 @@ struct CarProfile {
     float reliability;          //failure probability (optional later)
 };
 
-struct DriverProfice {
+struct DriverProfile {
     std::string driver_id;
 
     //Behavioural traits(0.0 - 1.0)
