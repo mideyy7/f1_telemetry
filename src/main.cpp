@@ -104,9 +104,10 @@ int main() {
                 return a.position < b.position;
             });
         leaderboard.update(std::move(sorted));
-        race_state.set_lap(generator.race_lap());
-
         int lap = generator.race_lap();
+        race_state.set_lap(lap);
+
+        
         if (++tick_counter % 9 == 0) {
             bool idle = !track_limits_future.valid() ||
                 track_limits_future.wait_for(std::chrono::seconds(0)) == std::future_status::ready;
