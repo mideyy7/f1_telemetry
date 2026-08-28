@@ -1,0 +1,156 @@
+<svg width="1550" height="950" viewBox="0 0 1550 950" xmlns="http://www.w3.org/2000/svg" font-family="Arial, Helvetica, sans-serif">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M1 1 L9 5 L1 9 z" fill="#333333"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="1550" height="950" fill="#FFFFFF"/>
+  <text x="775" y="34" text-anchor="middle" font-size="22" fill="#111111">RaceCondition-Z — thread &amp; data-flow architecture</text>
+
+  <!-- ===== LEGEND ===== -->
+  <rect x="1210" y="70" width="260" height="130" fill="#FFFFFF" stroke="#999999" stroke-width="1"/>
+  <rect x="1226" y="86" width="26" height="18" fill="#BFE8C8" stroke="#3F8F52"/>
+  <text x="1260" y="100" font-size="13" fill="#222222">= OS thread</text>
+  <path d="M1226 118 A13 5 0 0 0 1252 118 L1252 130 A13 5 0 0 1 1226 130 Z" fill="#D6D6D6" stroke="#666666" stroke-width="1"/>
+  <ellipse cx="1239" cy="118" rx="13" ry="5" fill="#E4E4E4" stroke="#666666" stroke-width="1"/>
+  <text x="1260" y="130" font-size="13" fill="#222222">= shared structure</text>
+  <line x1="1226" y1="152" x2="1252" y2="152" stroke="#333333" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="1260" y="157" font-size="13" fill="#222222">= data flow</text>
+  <text x="1226" y="182" font-size="11" fill="#666666">Cylinder subtitles note sync</text>
+
+  <!-- ===== GENERATOR THREAD ===== -->
+  <rect x="40" y="70" width="470" height="270" rx="6" fill="#BFE8C8" stroke="#3F8F52" stroke-width="1.5"/>
+  <text x="60" y="100" font-size="16" font-weight="bold" fill="#1E4D2B">Generator thread</text>
+  <text x="60" y="120" font-size="12" fill="#2B6B3B">std::jthread, 50 Hz tick</text>
+  <line x1="60" y1="132" x2="490" y2="132" stroke="#3F8F52" stroke-width="0.75" opacity="0.5"/>
+  <text x="60" y="155" font-size="12.5" fill="#1E4D2B">TelemetryGenerator::tick()</text>
+  <text x="72" y="175" font-size="12" fill="#1E4D2B">• sort standings</text>
+  <text x="72" y="193" font-size="12" fill="#1E4D2B">• run physics for 20 drivers</text>
+  <text x="72" y="211" font-size="12" fill="#1E4D2B">• drain race-control events</text>
+  <line x1="60" y1="225" x2="490" y2="225" stroke="#3F8F52" stroke-width="0.75" opacity="0.5"/>
+  <text x="60" y="248" font-size="12.5" font-weight="bold" fill="#1E4D2B">PenaltyEnforcer::process_events()</text>
+  <text x="60" y="266" font-size="11.5" fill="#2B6B3B">only consumer of MPSC queue</text>
+  <path d="M84 300 C60 288, 60 316, 82 306" fill="none" stroke="#3F8F52" stroke-width="1.25" marker-end="url(#arrow)"/>
+  <text x="96" y="298" font-size="11" fill="#1E4D2B">self-loop: 3rd warning →</text>
+  <text x="96" y="312" font-size="11" fill="#1E4D2B">CAS penalty_state NONE→PENDING</text>
+
+  <!-- ===== SPSC RING BUFFER ===== -->
+  <path d="M800 105 A175 15 0 0 0 1150 105 L1150 175 A175 15 0 0 1 800 175 Z" fill="#D6D6D6" stroke="#666666" stroke-width="1.5"/>
+  <ellipse cx="975" cy="105" rx="175" ry="15" fill="#E4E4E4" stroke="#666666" stroke-width="1.5"/>
+  <text x="975" y="140" text-anchor="middle" font-size="14" font-weight="bold" fill="#222222">SPSC ring buffer</text>
+  <text x="975" y="158" text-anchor="middle" font-size="11" fill="#444444">TelemetryFrame · lock-free · cap 2048 · 1 producer → 1 consumer</text>
+
+  <!-- ===== LAPTIMECONSUMER ===== -->
+  <rect x="1210" y="260" width="260" height="120" rx="6" fill="#F0C9EF" stroke="#A34FA0" stroke-width="1.5"/>
+  <text x="1230" y="290" font-size="15" font-weight="bold" fill="#6B266A">LapTimeConsumer thread</text>
+  <text x="1230" y="308" font-size="11.5" fill="#8A3789">std::jthread</text>
+  <text x="1230" y="335" font-size="11.5" fill="#6B266A">on completed lap:</text>
+  <text x="1230" y="352" font-size="11.5" fill="#6B266A">try_claim_fastest_lap (CAS)</text>
+
+  <!-- ===== MPSC QUEUE ===== -->
+  <path d="M300 445 A175 15 0 0 0 650 445 L650 515 A175 15 0 0 1 300 515 Z" fill="#D6D6D6" stroke="#666666" stroke-width="1.5"/>
+  <ellipse cx="475" cy="445" rx="175" ry="15" fill="#E4E4E4" stroke="#666666" stroke-width="1.5"/>
+  <text x="475" y="480" text-anchor="middle" font-size="14" font-weight="bold" fill="#222222">MPSC queue</text>
+  <text x="475" y="498" text-anchor="middle" font-size="11" fill="#444444">RaceControlEvent · lock-free · unbounded · many producers → 1 consumer</text>
+
+  <!-- ===== THREADPOOL ===== -->
+  <rect x="690" y="380" width="460" height="240" rx="8" fill="#EDEDF5" stroke="#8B7BAE" stroke-width="1.5"/>
+  <text x="710" y="408" font-size="15" font-weight="bold" fill="#4A3B72">ThreadPool</text>
+  <text x="710" y="426" font-size="11.5" fill="#6C4A9C">2 workers, one shared queue, either worker runs either job</text>
+
+  <rect x="715" y="440" width="200" height="70" rx="6" fill="#F5D9A8" stroke="#B8863A" stroke-width="1.5"/>
+  <text x="815" y="465" text-anchor="middle" font-size="12" font-weight="bold" fill="#6B4E1A">TrackLimitsMonitor</text>
+  <text x="815" y="481" text-anchor="middle" font-size="12" font-weight="bold" fill="#6B4E1A">::check()</text>
+  <text x="815" y="498" text-anchor="middle" font-size="10.5" fill="#8C6A2C">every 9th tick</text>
+
+  <rect x="925" y="440" width="200" height="70" rx="6" fill="#F5D9A8" stroke="#B8863A" stroke-width="1.5"/>
+  <text x="1025" y="465" text-anchor="middle" font-size="12" font-weight="bold" fill="#6B4E1A">WeatherSystem</text>
+  <text x="1025" y="481" text-anchor="middle" font-size="12" font-weight="bold" fill="#6B4E1A">::update()</text>
+  <text x="1025" y="498" text-anchor="middle" font-size="10.5" fill="#8C6A2C">throttled every 5 laps</text>
+
+  <path d="M820 530 A90 10 0 0 0 1000 530 L1000 555 A90 10 0 0 1 820 555 Z" fill="#D6D6D6" stroke="#666666" stroke-width="1.25"/>
+  <ellipse cx="910" cy="530" rx="90" ry="10" fill="#E4E4E4" stroke="#666666" stroke-width="1.25"/>
+  <text x="910" y="547" text-anchor="middle" font-size="10.5" fill="#333333">task queue</text>
+  <line x1="815" y1="510" x2="890" y2="528" stroke="#8B7BAE" stroke-width="1" stroke-dasharray="3 2"/>
+  <line x1="1025" y1="510" x2="935" y2="528" stroke="#8B7BAE" stroke-width="1" stroke-dasharray="3 2"/>
+
+  <!-- ===== LEADERBOARD ===== -->
+  <path d="M40 665 A150 15 0 0 0 340 665 L340 730 A150 15 0 0 1 40 730 Z" fill="#D6D6D6" stroke="#666666" stroke-width="1.5"/>
+  <ellipse cx="190" cy="665" rx="150" ry="15" fill="#E4E4E4" stroke="#666666" stroke-width="1.5"/>
+  <text x="190" y="697" text-anchor="middle" font-size="14" font-weight="bold" fill="#222222">Leaderboard</text>
+  <text x="190" y="714" text-anchor="middle" font-size="11" fill="#444444">std::shared_mutex — single writer / many readers</text>
+
+  <!-- ===== WEATHERSYSTEM STATE ===== -->
+  <path d="M885 665 A140 15 0 0 0 1165 665 L1165 730 A140 15 0 0 1 885 730 Z" fill="#D6D6D6" stroke="#666666" stroke-width="1.5"/>
+  <ellipse cx="1025" cy="665" rx="140" ry="15" fill="#E4E4E4" stroke="#666666" stroke-width="1.5"/>
+  <text x="1025" y="697" text-anchor="middle" font-size="14" font-weight="bold" fill="#222222">WeatherSystem state</text>
+  <text x="1025" y="714" text-anchor="middle" font-size="11" fill="#444444">std::shared_mutex</text>
+
+  <!-- ===== RACESTATE ===== -->
+  <path d="M1195 665 A140 15 0 0 0 1475 665 L1475 730 A140 15 0 0 1 1195 730 Z" fill="#D6D6D6" stroke="#666666" stroke-width="1.5"/>
+  <ellipse cx="1335" cy="665" rx="140" ry="15" fill="#E4E4E4" stroke="#666666" stroke-width="1.5"/>
+  <text x="1335" y="695" text-anchor="middle" font-size="13" font-weight="bold" fill="#222222">RaceState.fastest_lap_holder</text>
+  <text x="1335" y="714" text-anchor="middle" font-size="11" fill="#444444">atomic · CAS claim</text>
+
+  <!-- ===== MAIN THREAD ===== -->
+  <rect x="40" y="800" width="1430" height="100" rx="8" fill="#CFCCF5" stroke="#6C63B5" stroke-width="1.5"/>
+  <text x="60" y="838" font-size="16" font-weight="bold" fill="#332E7A">Main thread</text>
+  <text x="60" y="858" font-size="12" fill="#443C99">reads shared state every 500 ms, prints console snapshot</text>
+  <text x="60" y="876" font-size="11" fill="#443C99">(final read of fastest-lap holder happens once, after the race loop ends)</text>
+
+  <!-- ===== ARROWS ===== -->
+  <!-- Generator -> SPSC -->
+  <line x1="510" y1="150" x2="795" y2="145" stroke="#333333" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="580" y="140" font-size="12" fill="#222222">push Frame</text>
+
+  <!-- Generator -> ThreadPool -->
+  <path d="M510 230 L670 230 L670 400 L685 400" fill="none" stroke="#333333" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="580" y="222" font-size="12" fill="#222222">submit Jobs</text>
+
+  <!-- MPSC -> Generator (pop Event) -->
+  <line x1="475" y1="440" x2="475" y2="345" stroke="#333333" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="483" y="400" font-size="12" fill="#222222">pop Event</text>
+
+  <!-- Generator -> MPSC (push Event / PENALTY_ISSUED) -->
+  <line x1="430" y1="345" x2="430" y2="440" stroke="#333333" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="330" y="400" font-size="12" fill="#222222">push Event</text>
+
+  <!-- Generator -> Leaderboard -->
+  <line x1="150" y1="345" x2="150" y2="660" stroke="#333333" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="160" y="510" font-size="12" fill="#222222">write Standings</text>
+
+  <!-- TrackLimitsMonitor -> MPSC -->
+  <line x1="712" y1="460" x2="655" y2="460" stroke="#333333" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="600" y="452" text-anchor="end" font-size="11" fill="#222222">push TRACK_LIMITS event</text>
+
+  <!-- WeatherSystem -> MPSC -->
+  <path d="M925 505 L925 600 L475 600 L475 520" fill="none" stroke="#333333" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="700" y="595" text-anchor="middle" font-size="11" fill="#222222">push WEATHER_CHANGE event</text>
+
+  <!-- WeatherSystem -> WeatherSystem state -->
+  <line x1="1025" y1="510" x2="1025" y2="660" stroke="#333333" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="1035" y="590" font-size="12" fill="#222222">write</text>
+  <text x="1035" y="605" font-size="12" fill="#222222">(shared_mutex)</text>
+
+  <!-- SPSC -> LapTimeConsumer -->
+  <line x1="1140" y1="175" x2="1290" y2="258" stroke="#333333" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="1170" y="210" font-size="12" fill="#222222">pop Frame</text>
+
+  <!-- LapTimeConsumer -> RaceState -->
+  <line x1="1335" y1="380" x2="1335" y2="660" stroke="#333333" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="1345" y="500" font-size="12" fill="#222222">CAS try-claim</text>
+
+  <!-- Main -> Leaderboard -->
+  <line x1="150" y1="798" x2="150" y2="732" stroke="#333333" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="160" y="770" font-size="12" fill="#222222">read</text>
+
+  <!-- Main -> WeatherSystem state -->
+  <line x1="1025" y1="798" x2="1025" y2="732" stroke="#333333" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="1035" y="770" font-size="12" fill="#222222">read</text>
+
+  <!-- Main -> RaceState -->
+  <line x1="1335" y1="798" x2="1335" y2="732" stroke="#333333" stroke-width="1.5" stroke-dasharray="5 3" marker-end="url(#arrow)"/>
+  <text x="1345" y="770" font-size="12" fill="#222222">final read</text>
+
+</svg>
