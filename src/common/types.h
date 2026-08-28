@@ -25,7 +25,6 @@ struct DriverProfile {
     std::string id;
     std::string name;
     std::string team;
-    std::string color;
     float aggression;   // how hard they push
     float consistency;  // lap to lap variation
     float tire_mgmt;    // how gently they treat tires
