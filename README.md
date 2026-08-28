@@ -1,146 +1,151 @@
 # RaceCondition-Z
 
-A multithreaded F1 race telemetry simulator in C++23 — 20 drivers generating live physics-based telemetry at 50Hz across five real threads, with lock-free queues and CAS-based state machines doing the actual coordination, not `std::mutex` sprinkled everywhere.
+A multithreaded F1 telemetry simulator with 20 drivers streaming physics-based telemetry at 50 Hz across five threads, coordinated by hand-written lock-free queues and CAS state machines on the hot paths, with a `shared_mutex` SWMR pattern where shared reads are necessary.
 
-It's a systems-programming exercise wearing a race simulator's clothes: the interesting code is the lock-free queues, the memory-ordering discipline, and the thread topology — not the driver stats.
+## The five threads
+
+1. **Generator thread** (`std::jthread`) — runs the physics tick at 50 Hz: updates all 20 drivers, publishes standings to the `Leaderboard`, pushes `TelemetryFrame`s into the SPSC ring buffer, and drains the MPSC event queue via `PenaltyEnforcer::process_events()`.
+2. **ThreadPool worker 1** — runs `TrackLimitsMonitor::check()` off the generator thread (every 9th tick), pushing `TRACK_LIMITS` events into the MPSC queue.
+3. **ThreadPool worker 2** — runs `WeatherSystem::update()` (self-throttled every 5 laps), pushing `WEATHER_CHANGE` events into the MPSC queue and writing weather state under a `shared_mutex`. (Either worker can run either job.)
+4. **LapTimeConsumer thread** (`std::jthread`) — the SPSC queue's consumer: drains `TelemetryFrame`s and, on a completed lap, races to claim the fastest lap via `RaceState::try_claim_fastest_lap` (CAS retry loop).
+5. **Main thread** — every 500 ms while the race runs, reads `Leaderboard`, `WeatherSystem`, and per-driver `PenaltyEnforcer` state; after the loop exits, reads the final standings and fastest-lap holder for the summary.
 
 ## At a glance
 
-**C++23** · CMake + FetchContent (GoogleTest) · custom lock-free SPSC/MPSC queues · `std::shared_mutex` SWMR pattern · `ThreadPool` (`packaged_task`/`future`) · `std::jthread`/`stop_token` · 54 GoogleTest cases (20 concurrency-focused, clean under **ThreadSanitizer** including the live binary itself, not just the test suites) · SPSC ring buffer is **8.8x faster than a `std::mutex`+`std::deque` baseline measured on the same workload** — not just a throughput number in isolation.
-
-## In action
-
-<img src="docs/test_run.png" alt="cmake build and ctest output, plus a ThreadSanitizer run of the live binary showing zero warnings" width="800">
-
-*Release build, the 6-suite/54-case CTest run, and a ThreadSanitizer run of the live binary itself — 0 warnings, not just the isolated test suites.*
-
-<img src="docs/race_run.png" alt="Live console output of a 50-lap race simulation, showing a pit stop, a track-limits penalty, and the fastest-lap winner" width="800">
-
-*A live 50-lap, 20-driver race: a mid-race snapshot with a car in the pits and a live track-limits penalty, then the final classification and the fastest lap — claimed via a real cross-thread CAS race, not a single-threaded scan.*
-
-<img src="docs/benchmarks.png" alt="Benchmark harness output showing queue throughput and latency percentiles" width="800">
-
-*`benchmarks/benchmark.py` driving the Release/-O3 benchmark binary — real numbers from this machine, not vendored figures.*
-
-## What this demonstrates
-
-- **Lock-free concurrency, not just `std::mutex` everywhere.** The SPSC ring buffer ([spsc_queue.h](src/concurrency/spsc_queue.h)) and MPSC event queue ([mpsc_queue.h](src/concurrency/mpsc_queue.h)) are hand-written with explicit `acquire`/`release` memory ordering — no `seq_cst` used as a crutch. Every non-obvious ordering choice has a comment explaining *why* that ordering (not a stronger one) is sufficient.
-- **Cache-conscious design, and the padding claim is measured, not asserted.** The SPSC queue splits producer and consumer state onto separate `alignas(64)` cache lines, each caching the other side's index so the hot path touches zero foreign cache lines in steady state. The benchmark suite includes an ablation — same queue, same workload, only the alignment changes — showing the padding is worth 1.3x, a real but modest effect, reported honestly rather than rounded up. The MPSC queue is a Vyukov-style intrusive linked list (unbounded, `exchange`-based enqueue) rather than a lock-protected `std::deque`.
-- **Benchmarks that answer "does this actually help," not just "how fast is it."** Every lock-free structure is benchmarked against a `std::mutex`+`std::deque` baseline on the identical workload (SPSC: 8.8x faster; MPSC: only 1.7x faster). The gap between those two numbers is itself informative: MPSC's smaller advantage traces to a per-push heap allocation ([mpsc_queue.h:37](src/concurrency/mpsc_queue.h)) that costs the same whether or not there's a mutex — removing the lock alone doesn't remove the allocator cost. The `Leaderboard` benchmark also reports the writer's `update()` latency under concurrent read load (p50 167ns, p99 49.5µs), not just read throughput — the read number alone would have hidden that a `shared_mutex` writer can get stuck behind a burst of readers.
-- **Every atomic field's memory order is a deliberate choice, not a default.** [`RaceState`](src/common/race_state.h) documents, per field, why `relaxed` is safe for the informational lap counter versus why `acquire`/`release` is required for the safety-car broadcast versus why a CAS retry loop is needed for the fastest-lap claim. `TelemetryGenerator`'s own `race_finished_`/`race_lap_` follow the same discipline: `acquire`/`release` on the flag that gates the main thread's loop exit, `relaxed` on the counter.
-- **CAS-based state machines, used where they're actually needed.** [`PenaltyEnforcer`](src/race_control/penalty_enforcer.cpp) uses `compare_exchange_strong` for the `NONE → PENDING` penalty transition specifically because two threads could race to issue the same penalty on the 3rd warning; a `fetch_add` alone isn't enough there, but *is* enough for the warning counter itself. [`LapTimeConsumer`](src/simulation/lap_time_consumer.cpp) uses `RaceState::try_claim_fastest_lap`'s CAS retry loop for exactly the same reason — multiple threads can observe a lap completion around the same time, and exactly one should win.
-- **Correctness under real contention, not just single-threaded unit tests.** Every concurrent primitive has a dedicated multi-thread stress test (e.g. `MpscQueueTest.NoItemsLostConcurrent`, `LapTimeConsumerTest.ConcurrentConsumersExactlyOneWinner`), and both the concurrency suite *and* the live application binary pass cleanly under ThreadSanitizer.
-- **A real test pyramid.** 1,584 lines of implementation code back onto 940 lines of GoogleTest across 6 suites (54 cases) — unit tests for pure logic, multi-thread stress tests for the queues and consumers, and a dedicated benchmark harness for throughput/latency claims.
-
-## Architecture
-
-```
-Generator thread (jthread, 50 Hz tick)
-├─ TelemetryGenerator::tick()  [20 drivers: speed, tires, fuel, position]
-│    ├─ sorted DriverState[] ──────────> Leaderboard (shared_mutex, write)
-│    ├─ states_copy (by value) + lap ──> submit to ThreadPool: TrackLimitsMonitor::check()
-│    ├─ lap ────────────────────────────> submit to ThreadPool: WeatherSystem::update()
-│    └─ push TelemetryFrame ────────────> SPSC ring buffer (cap 2048)
-└─ PenaltyEnforcer::process_events()   [the only thing that pops the MPSC queue]
-     ├─ pop RaceControlEvent <───────── MPSC queue (lock-free, unbounded)
-     ├─ on 3rd TRACK_LIMITS warning: CAS penalty_state[20] NONE -> PENDING
-     └─ push PENALTY_ISSUED event ─────> MPSC queue (self — same thread, not concurrent)
-
-ThreadPool — 2 workers pulling from one shared task queue (no fixed pinning;
-either worker can run either job below), each job single-flight (at most 1
-call in flight at a time)
-├─ TrackLimitsMonitor::check()   [every 9th tick]
-│    └─ push TRACK_LIMITS event ──────────> MPSC queue
-└─ WeatherSystem::update()       [every tick, self-throttles every 5 laps]
-     ├─ push WEATHER_CHANGE event ────────> MPSC queue
-     └─ write weather state (shared_mutex)
-
-LapTimeConsumer thread (jthread)
-├─ pop TelemetryFrame <──────────── SPSC ring buffer
-└─ on a completed lap: CAS RaceState::try_claim_fastest_lap ──> fastest_lap_holder (atomic)
-
-Main thread
-├─ every 500ms while the race is running:
-│    ├─ read Leaderboard.snapshot()
-│    ├─ read WeatherSystem.current() / grip_factor()
-│    └─ read PenaltyEnforcer.penalty_state() per driver
-└─ once, after that loop exits:
-     ├─ read Leaderboard.snapshot() again (final standings)
-     └─ read RaceState.get_fastest_lap_holder()   <- NOT part of the periodic loop
-```
-
-Five real OS threads, each with cross-thread data flow:
-
-1. **Generator thread** — runs the physics tick at 50Hz, publishes to `Leaderboard` (read by the main thread), and drains the MPSC queue via `PenaltyEnforcer::process_events()` — which also pushes a `PENALTY_ISSUED` event back into that same queue when a driver's 3rd warning lands, to be picked up on the next call. That self-push happens synchronously on the consumer's own thread, not concurrently with anything.
-2. **Two `ThreadPool` workers** — run `TrackLimitsMonitor::check()` and `WeatherSystem::update()` off the generator thread, each pushing `RaceControlEvent`s into the *same* MPSC queue concurrently — the one place in the app where the MPSC queue's multi-producer contract is genuinely exercised by separate concurrent threads, rather than only under `MpscQueueTest.MultiProducerStress`. Each job is guarded by a stored `std::future` so at most one call is ever in flight per job — both `TrackLimitsMonitor` and `WeatherSystem` carry unsynchronized RNG state, so two workers calling into the *same* instance concurrently would itself be a race; single-flight submission avoids that without touching either class's internals. The states vector passed to `TrackLimitsMonitor::check()` is explicitly copied before submission — capturing the generator's live vector by reference would race with the very next tick's mutation of it.
-3. **`LapTimeConsumer` thread** — the SPSC queue's consumer. Drains `TelemetryFrame`s and, on any frame marking a completed lap, races to claim it via `RaceState::try_claim_fastest_lap` — a CAS retry loop also covered by `RaceStateTest.FastestLapCasExactlyOneWinner`.
-4. **Main thread** — reads `Leaderboard`, `WeatherSystem`, and `PenaltyEnforcer` state every 500ms while the race is running. `RaceState`'s fastest-lap holder is read separately, once, after that loop exits — it's part of the final summary printout, not the periodic snapshot.
-
-## Benchmarks
-
-Measured with `python3 benchmarks/benchmark.py`, which builds `rcz_bench` in `-O3`/`NDEBUG` and runs it — the script is in the repo, so every number below is reproducible on your own machine (numbers will vary with core count and background load; see the note below the table).
-
-Every lock-free structure is benchmarked against a `std::mutex`+`std::deque` baseline measured on the same workload, and the SPSC queue additionally gets a cache-line-padding ablation (`alignas(64)` vs `alignas(8)` — 8 is the type's natural alignment floor, since `std::atomic<size_t>` can't be under-aligned below that) — so the padding claim in its doc comment is a measured number, not an assertion.
-
-Measured on an **Apple M1, 8 logical cores**:
-
-| Component | Measurement | Result |
-|---|---|---|
-| SPSC ring buffer | 1 producer → 1 consumer, 10M `TelemetryFrame`s, count-based timing | **43.6M ops/sec** |
-| SPSC vs `std::mutex`+`std::deque` | same workload, 2s window | mutex: 4.9M ops/sec → lock-free is **8.8x faster** |
-| SPSC vs no cache-line padding | same queue, `alignas(8)` instead of `alignas(64)` | unpadded: 33.2M ops/sec → padding is **1.3x faster** |
-| SPSC `push()` call latency | 100K samples, isolated from consumer/round-trip | p50 42ns / p95 42ns / p99 42ns / p99.9 84ns |
-| MPSC event queue | 4 concurrent producers → 1 consumer, 2s window, `RaceControlEvent` | **13.5M ops/sec** aggregate |
-| MPSC vs `std::mutex`+`std::deque` | same workload, same producer count | mutex: 7.9M ops/sec → lock-free is **1.7x faster** |
-| MPSC `push()` call latency | 4 producers, 20K samples each, 80K total | p50 209ns / p95 583ns / p99 1.1µs / p99.9 1.5µs |
-| Thread pool dispatch | 8 workers × 10,000 rounds = 80K `packaged_task` submissions, submit→start latency | p50 2.9µs / p95 11.2µs / p99 21.4µs / p99.9 36.8µs |
-| Leaderboard SWMR reads | 7 readers + 1 writer (10ms write cadence), 20-driver snapshot copy, 2s window | **2.81M reads/sec** |
-| Leaderboard write latency | writer's `update()` cost under the same concurrent read load | p50 167ns / p95 24.2µs / p99 49.5µs / p99.9 84.3µs |
-| End-to-end pipeline | SPSC push→pop round-trip latency, 100K timestamped samples | p50 54.8µs / p95 152.4µs / p99 231.4µs / p99.9 243.4µs |
-
-Two findings worth calling out:
-
-- **The MPSC queue's lock-free advantage (1.7x) is much smaller than the SPSC queue's (8.8x)** — because every `MpscQueue::push()` does a `new Node{...}` heap allocation regardless of whether it's lock-free or mutex-guarded ([mpsc_queue.h:37](src/concurrency/mpsc_queue.h)). Removing the mutex only removes the mutex's cost; it doesn't touch the allocator, which is the larger fraction of the per-push cost here. A pooled/freelist node allocator would be the next lever if MPSC throughput mattered more than it currently does in this app — see "what I'd do next."
-- **The leaderboard's write latency has a long tail that the read-throughput number alone completely hides**: p50 is 167ns, but p99 is 49.5µs — nearly 300x worse. That's the actual cost side of the SWMR tradeoff: readers proceed in parallel, but the writer can get stuck behind a burst of them holding the shared lock. Read throughput alone would make `shared_mutex` look like a free lunch for the writer; it isn't.
-
-Methodology notes:
-- SPSC/MPSC *throughput* is **count**-based (time from first push to last pop) or a fixed time window, not per-op sampled — avoids `Clock::now()` overhead polluting the hot loop. The *push-latency* benchmarks use a deliberately different, slower methodology (timestamp every call) — that tradeoff is the point when what's needed is a distribution, not a rate.
-- Thread-pool latency is measured after a warm-up round so workers are already spun up; it reflects steady-state dispatch, not cold-start.
-- These numbers move noticeably between consecutive runs on this laptop (e2e p99 ranged 56–231µs across repeated runs) — this is a shared dev machine, not an isolated benchmark box, and Apple Silicon's P-core/E-core split means thread placement isn't fully controlled either. Treat the table as the right order of magnitude, not a precise SLA.
-- The throughput/baseline benchmarks are not re-verified under ThreadSanitizer (TSan changes timing too much to be meaningful there) — the TSan runs described above cover *correctness* (the concurrency test suite and the live binary), which is the claim they're actually backing.
+| | |
+|---|---|
+| **Language** | C/C++, Python |
+| **Build** | CMake, GoogleTest |
+| **Concurrency primitives** | hand-written lock-free SPSC ring buffer + Vyukov-style MPSC intrusive linked list; CAS state machines; `ThreadPool` (`packaged_task`/`future`, 2 workers, one shared queue); `std::shared_mutex` SWMR for `Leaderboard` and `WeatherSystem` |
+| **Memory ordering** | explicit `acquire`/`release` throughout |
+| **Tests** | 55 GoogleTest cases across 6 CTest binaries; dedicated multi-thread stress tests for every concurrent primitive |
+| **Sanitizers** | test suites and the live binary both run clean under ThreadSanitizer |
+| **Benchmarks** | every lock-free structure measured against a `std::mutex`+`std::deque` baseline on the same workload (SPSC ring buffer: **~12× faster**) |
+| **Size** | ~1,600 lines of implementation, ~965 lines of tests |
 
 ## Build & run
 
-Requires CMake ≥ 3.20 and a C++23 compiler (tested with AppleClang 17 / Xcode 17). First configure fetches GoogleTest via `FetchContent`.
+**Prerequisites:** a C++23 compiler (Clang 15+ or GCC 12+), CMake ≥ 3.20, and Python 3 (for the benchmark harness). The first configure needs network access — `FetchContent` pulls GoogleTest v1.14.0.
 
 ```bash
-# Configure + build (Release)
-cmake -B build -S . -DCMAKE_BUILD_TYPE=Release
-cmake --build build --parallel
+# configure + build
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j
 
-# Run the test suite (6 suites, 54 cases)
-ctest --test-dir build --output-on-failure
-
-# Run the live simulation
+# run a full race to the finish
 ./build/src/RaceCondition-z
-
-# Run the benchmark suite (builds a separate -O3 binary, ~30s)
-python3 benchmarks/benchmark.py
 ```
 
-To reproduce the ThreadSanitizer run shown above — including running the *live binary* itself, not just the test suites:
+Race parameters (lap count, driver count, tick rate) are hardcoded — there are no CLI flags.
+
+<img src="docs/race_run.png" alt="Live console output of a race simulation showing a pit stop, a track-limits penalty, and the final classification" width="800">
+
+*A live race: a mid-race snapshot with a car in the pits and a track-limits penalty, then the final classification and the fastest lap — claimed via a real cross-thread CAS race.*
+
+## Architecture
+
+<img src="docs/architecture.svg" alt="Thread and data-flow diagram: the Generator, LapTimeConsumer, and Main threads plus a 2-worker ThreadPool, connected through a lock-free SPSC ring buffer, a lock-free MPSC event queue, and shared_mutex-guarded Leaderboard and WeatherSystem state" width="100%">
+
+**The two queues.** The SPSC ring buffer carries the high-rate telemetry stream (one producer, one consumer). The MPSC queue carries low-rate race-control events from up to three concurrent producers — the two pool workers plus the generator's own `PENALTY_ISSUED` self-push — into a single consumer (`PenaltyEnforcer::process_events()`, on the generator thread). The pool workers are the only place the MPSC multi-producer contract is exercised concurrently outside the stress tests.
+
+## Testing
 
 ```bash
-cmake -B build-tsan -S . -DCMAKE_CXX_FLAGS="-fsanitize=thread -g" -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=thread"
-cmake --build build-tsan --target test_concurrency test_simulation RaceCondition-z --parallel
-./build-tsan/tests/test_concurrency
-./build-tsan/tests/test_simulation
-./build-tsan/src/RaceCondition-z
+ctest --test-dir build --output-on-failure          # all 6 suites
+ctest --test-dir build -R test_concurrency -V       # just the queue/pool suite
+./build/tests/test_concurrency                       # run one suite's binary directly
 ```
 
-## What I'd do next
+<img src="docs/test_run.png" alt="CMake build, the CTest run, and a ThreadSanitizer run of the live binary with zero warnings" width="800">
 
-- Wire a live terminal dashboard (e.g. FTXUI) as a second, real-time consumer of `Leaderboard`'s snapshots — a further-out plan, not yet started.
-- `should_pit()` supports exactly one stop per driver; multi-stop strategy branching is the obvious next simulation feature.
-- Add a fuzz/property test for the SPSC index math (`(tail + 1) & MASK` correctness under adversarial capacities) rather than relying solely on fixed-capacity unit tests.
-- `TelemetryGenerator::standings()` returns a copy but isn't actually thread-safe (the source vector is mutated without synchronization); it's currently unused, but worth either locking it properly or removing it before anyone relies on it.
+*Release build, the full CTest run, and ThreadSanitizer on the live binary — 0 warnings, not just the isolated test suites.*
+
+55 GoogleTest cases across 6 CTest binaries (`test_types`, `test_concurrency`, `test_telemetry`, `test_simulation`, `test_race_control`, `test_shared_state`):
+
+- **Pure-logic unit tests** — penalty escalation, track-limits rate calibration, weather transitions, leaderboard ordering and gap formatting.
+- **Multi-thread stress tests** — one per concurrent primitive: `SpscQueueTest.ConcurrentStress`, `MpscQueueTest.MultiProducerStress` / `NoItemsLostConcurrent`, `ThreadPoolTest.SharedAtomicCounter` / `DestructorJoinsCleanly`, `LeaderboardTest.SwmrNoTearing`, `RaceStateTest.LapCounterNoLostUpdates` / `FastestLapCasExactlyOneWinner` / `ReleaseAcquireHappensBefore`, `LapTimeConsumerTest.ConcurrentConsumersExactlyOneWinner`.
+
+### ThreadSanitizer
+
+Both the test suites and the live `RaceCondition-z` binary run clean under TSan:
+
+```bash
+cmake -S . -B build-tsan -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_FLAGS="-fsanitize=thread -g -O1"
+cmake --build build-tsan -j
+ctest --test-dir build-tsan --output-on-failure   # test suites
+./build-tsan/src/RaceCondition-z                   # the live binary
+```
+
+## Benchmarks
+
+```bash
+python3 benchmarks/benchmark.py        # builds rcz_bench in -O3 and runs it
+python3 benchmarks/benchmark.py --run  # re-run without rebuilding
+```
+
+<img src="docs/benchmarks.png" alt="Benchmark harness output showing queue throughput and latency percentiles" width="800">
+
+*`benchmarks/benchmark.py` driving the `-O3` benchmark binary — real numbers from the machine it ran on.*
+
+The harness builds `rcz_bench` in `-O3`/`NDEBUG` and runs it — every number below is reproducible on your own machine. Each lock-free structure is measured against a `std::mutex`+`std::deque` baseline on the identical workload; the SPSC queue also gets a cache-line-padding ablation (`alignas(64)` vs `alignas(8)`), so the padding claim in its doc comment is a measured number, not an assertion.
+
+Figures below are from two runs on an **Apple M1 (8 cores)**. Throughput and tail latencies vary run-to-run with background load — the end-to-end pipeline latency especially (it folds in consumer scheduling delay).
+
+| Component | Measurement | Result |
+|---|---|---|
+| SPSC ring buffer | 1 producer → 1 consumer, 10M `TelemetryFrame`s | **~28M ops/sec** |
+| SPSC vs `std::mutex`+`std::deque` | same workload | mutex ~2.4M ops/sec → **~12× faster** |
+| SPSC vs no cache-line padding | `alignas(8)` instead of `alignas(64)` | unpadded ~21M ops/sec → padding is **1.3× faster** |
+| SPSC `push()` latency | 100K samples, isolated | p50 42 ns / p95 84 ns / p99 84 ns |
+| MPSC event queue | 4 producers → 1 consumer | **~10M ops/sec** aggregate |
+| MPSC vs `std::mutex`+`std::deque` | same workload, same producer count | mutex ~5.8M ops/sec → **1.7× faster** |
+| MPSC `push()` latency | 4 producers, 80K samples | p50 ~300 ns / p95 ~600 ns / p99 ~800 ns / p99.9 ~1.5 µs |
+| Thread pool dispatch | 8 workers, 80K tasks, submit→start latency | p50 ~4 µs / p95 14 µs / p99 23 µs / p99.9 40 µs |
+| Leaderboard SWMR reads | 7 readers + 1 writer, 20-driver snapshot copy | **~2M reads/sec** |
+| Leaderboard write latency | writer's `update()` under concurrent read load | p50 ~290 ns / p95 ~35 µs / p99 ~65 µs / p99.9 ~118 µs |
+| End-to-end pipeline | SPSC push→pop round-trip, 100K samples | p50 45–215 µs / p99 140–245 µs (run-dependent) |
+
+### Where the numbers could go further
+
+The current speedups (SPSC padding 1.3×, MPSC vs mutex 1.7×) are modest because each structure has one dominant cost the lock-free rewrite doesn't remove. The next levers:
+
+- **MPSC — kill the per-push allocation.** Add a node freelist so popped nodes are recycled instead of `new`/`delete`d on every push, or switch to a bounded array-based MPSC ring buffer (no allocation at all, at the cost of a fixed capacity and a backpressure path). This is the single biggest lever — the 1.7× is allocator-bound, not lock-bound.
+- **SPSC — batch and shrink.** At ~28M ops/sec the `TelemetryFrame` copy dominates, not the atomics. Batched push/pop (amortise the index load/store and the cached-index refresh over N elements) and a tighter `TelemetryFrame` layout would move throughput more than any further queue tuning.
+- **End-to-end latency — stop polling.** The 45–245 µs p50/p99 spread is consumer wakeup jitter, not queue-op cost (`push()` is 42 ns). Replace the consumer's sleep/poll loop with a blocking `atomic::wait`/futex so it wakes on data rather than on a timer; pin threads to cores and raise QoS to cut scheduler migration jitter.
+- **Thread pool — per-worker queues.** The single shared task queue serialises submission. Per-worker queues with work-stealing plus `atomic::wait` instead of a condvar would trim the ~4 µs p50 submit→start path.
+- **Fairer baselines.** The `std::mutex` baselines run under low-to-moderate contention on an M1, where an uncontended mutex is cheap; the lock-free gap widens with more cores and more producers. Building with LTO + PGO would also shift the absolute numbers.
+
+## Project layout
+
+```
+src/
+├─ common/            plain data + shared state
+│  ├─ types.h            DriverState, TelemetryFrame, RaceControlEvent, enums
+│  ├─ season_data.h      driver/team roster
+│  ├─ leaderboard.h      shared_mutex SWMR standings store
+│  └─ race_state.h       atomic race flags + fastest-lap CAS claim
+├─ concurrency/       the hand-written primitives
+│  ├─ spsc_queue.h       lock-free single-producer/single-consumer ring buffer
+│  ├─ mpsc_queue.h       lock-free Vyukov-style multi-producer queue
+│  └─ thread_pool.{h,cpp}  packaged_task / future pool, 2 workers
+├─ simulation/
+│  ├─ telemetry_generator.{h,cpp}   50 Hz physics tick, SPSC producer, TOTAL_LAPS
+│  └─ lap_time_consumer.{h,cpp}     SPSC consumer, fastest-lap claim
+├─ race_control/
+│  ├─ track_limits.{h,cpp}     track-limits violation detection
+│  ├─ penalty_enforcer.{h,cpp} MPSC consumer, CAS penalty state machine
+│  └─ weather.{h,cpp}          weather transitions + grip factor
+└─ main.cpp           wires it all together, runs the race, prints the console UI
+
+tests/        GoogleTest suites, mirrors src/ layout
+benchmarks/   bench_main.cpp + benchmark.py harness
+docs/         screenshots + architecture.svg
+lessons/      write-ups on the thread pool and race-control design
+```
+
+## Design notes & trade-offs
+
+- **MPSC's advantage over a mutex is small (1.7×) by design.** Every push heap-allocates a node ([mpsc_queue.h](src/concurrency/mpsc_queue.h)); that allocator cost is paid with or without a lock, so removing the lock alone can't close the gap. The 8.8×→12× SPSC number and the 1.7× MPSC number together tell that story.
+- **Single-flight job submission instead of locking inside the systems.** `TrackLimitsMonitor` and `WeatherSystem` carry unsynchronized RNG state, so two pool workers in the same instance would race. Rather than add a mutex to each class, the generator guards each job with a stored `std::future` so at most one call is ever in flight.
+- **`states` is copied by value before `TrackLimitsMonitor::check()`.** Capturing the generator's live vector by reference would race with the next tick's mutation of it.
+- **TUI was dropped.** An earlier plan used `ftxui` for a live dashboard; it was removed to keep the focus on the concurrency core. The console printout in `main.cpp` is the current UI.
