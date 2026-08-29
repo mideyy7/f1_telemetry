@@ -1,6 +1,6 @@
 # RaceCondition-Z
 
-A multithreaded F1 telemetry simulator with 20 drivers streaming physics-based telemetry at 50 Hz across five threads, coordinated by hand-written lock-free queues and CAS state machines on the hot paths, with a `shared_mutex` SWMR pattern where shared reads are necessary.
+A multithreaded F1 telemetry simulator with 20 drivers streaming physics-based telemetry at 50 Hz across five threads, coordinated by lock-free queues and CAS state machines on the hot paths, with a `shared_mutex` SWMR pattern where shared reads are necessary.
 
 ## The five threads
 
