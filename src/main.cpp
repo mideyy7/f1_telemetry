@@ -50,13 +50,13 @@ static std::string format_gap(float gap_seconds, bool is_leader) {
 }
 
 int main() {
-    // ── Shared data structures (Phase 2 queues, Phase 5 shared state) ────────
+    // ── Shared data structures 
     SpscQueue<TelemetryFrame, 2048> telemetry_queue;
     MpscQueue<RaceControlEvent>     race_control_queue;
     Leaderboard                     leaderboard;
     RaceState                      race_state;
 
-    // ── Systems (Phase 3 producer, Phase 4 race control) ──────────────────────
+    // ── Systems 
     TelemetryGenerator generator{telemetry_queue};
     TrackLimitsMonitor track_limits{race_control_queue};
     PenaltyEnforcer     penalty{race_control_queue};
@@ -76,26 +76,6 @@ int main() {
     // Every tick (50Hz, on the generator's own background thread): sort the
     // standings by position, publish them to the leaderboard, update the
     // shared lap counter, and run the race-control checks for this tick.
-    //
-    // TrackLimitsMonitor::check()'s BASE_RATE was calibrated (and tested in
-    // Phase 4) assuming a call roughly once per sector crossing (~3x/lap),
-    // not once every 20ms tick. The race is ~26 ticks/lap over 3 sectors, so
-    // one call every ~9 ticks approximates that cadence. Calling it every
-    // tick (as a first draft of this file did) rolls the violation dice
-    // ~9x too often, and every driver ends up penalized by the end of the
-    // race -- unrealistic, and not a bug in TrackLimitsMonitor itself, just
-    // a mismatch between how often it's designed to be called and how
-    // often this integration was calling it.
-    //
-    // track_limits.check() and weather.update() now run on race_control_pool
-    // instead of inline here. Each is guarded so at most one call is ever in
-    // flight -- both classes carry unsynchronized RNG state, so two pool
-    // workers calling into the *same* instance concurrently would be a real
-    // data race; single-flight submission avoids that without needing to add
-    // locking inside either class. This also gives the MPSC queue genuine
-    // concurrent producers for the first time: while penalty.process_events()
-    // drains it here on the generator thread, both pool workers can be
-    // pushing into it at the same time.
     int tick_counter = 0;
     generator.set_on_tick([&](const std::vector<DriverState>& states) {
         auto sorted = states;
@@ -138,10 +118,8 @@ int main() {
     generator.start();
     lap_consumer.start();
 
-    // Main thread: every half second, read the shared state (through the
-    // exact same locks/atomics the phase3/4/5 tests exercised) and print a
-    // snapshot. This is a genuine concurrent read while the generator thread
-    // is actively writing -- not just a single-threaded replay.
+    // Main thread: every half second, read the shared state and print a snapshot. 
+    // This is a concurrent read while the generator thread is actively writing 
     auto race_start_time = std::chrono::steady_clock::now();
     const auto safety_timeout = std::chrono::seconds(60);
 
@@ -209,9 +187,8 @@ int main() {
                    << "\n";
     }
 
-    // Claimed via RaceState::try_claim_fastest_lap on the LapTimeConsumer
-    // thread -- a real cross-thread CAS race across every completed lap,
-    // not a single-threaded scan.
+    // Claimed via RaceState::try_claim_fastest_lap on the LapTimeConsumer thread 
+    //-- a cross-thread CAS race across every completed lap,
     int fastest_idx = race_state.get_fastest_lap_holder();
     if (fastest_idx >= 0 && fastest_idx < static_cast<int>(DRIVERS.size())) {
         float ms = race_state.get_fastest_lap_ms();
