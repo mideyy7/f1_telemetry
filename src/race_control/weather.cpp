@@ -12,18 +12,14 @@ void WeatherSystem::update(int current_lap) {
 
     WeatherState new_state;
     {
-        std::shared_lock read{mutex_};
+        std::unique_lock write {mutex_};
         // Transition: DRY->DAMP->WET->DRY (cycle)
         switch (state_) {
-            case WeatherState::DRY:  new_state = WeatherState::DAMP; break;
-            case WeatherState::DAMP: new_state = WeatherState::WET;  break;
-            case WeatherState::WET:  new_state = WeatherState::DRY;  break;
+            case WeatherState::DRY:  state_ = WeatherState::DAMP; break;
+            case WeatherState::DAMP: state_ = WeatherState::WET;  break;
+            case WeatherState::WET:  state_ = WeatherState::DRY;  break;
         }
-    }
-
-    {
-        std::unique_lock write{mutex_}; // exclusive — blocks all readers
-        state_ = new_state;
+        new_state = state_;
     }
 
     static const char* names[] = {"DRY", "DAMP", "WET"};
