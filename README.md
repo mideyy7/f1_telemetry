@@ -16,7 +16,7 @@ A multithreaded F1 telemetry simulator with 20 drivers streaming physics-based t
 |---|---|
 | **Language** | C/C++, Python |
 | **Build** | CMake, GoogleTest |
-| **Concurrency primitives** | hand-written lock-free SPSC ring buffer + Vyukov-style MPSC intrusive linked list; CAS state machines; `ThreadPool` (`packaged_task`/`future`, 2 workers, one shared queue); `std::shared_mutex` SWMR for `Leaderboard` and `WeatherSystem` |
+| **Concurrency primitives** | ock-free SPSC ring buffer + Vyukov-style MPSC intrusive linked list; CAS state machines; `ThreadPool` (`packaged_task`/`future`, 2 workers, one shared queue); `std::shared_mutex` SWMR for `Leaderboard` and `WeatherSystem` |
 | **Memory ordering** | explicit `acquire`/`release` throughout |
 | **Tests** | 55 GoogleTest cases across 6 CTest binaries; dedicated multi-thread stress tests for every concurrent primitive |
 | **Sanitizers** | test suites and the live binary both run clean under ThreadSanitizer |
